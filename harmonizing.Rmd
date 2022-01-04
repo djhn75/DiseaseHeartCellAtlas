@@ -1,0 +1,433 @@
+---
+title: "Data_wrangling"
+author: "Ralf"
+date: "October 15, 2020"
+output: html_document
+---
+
+
+```{r h5ad to h5seurat , include=FALSE}
+## Convert the h5ad (with SeuratDisk) file from the paper to a h5Seurat file to be able to load the data into R
+library(harmony)
+library(Seurat)
+library(Matrix)
+library(SeuratDisk)
+library(tidyverse)
+library(reshape2)
+
+# data of the human adult heart cell atlas
+#Convert("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/adult_heart_cell_atlas/global.h5ad","h5Seurat") # only once
+#Convert("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/adult_heart_cell_atlas/global.h5ad","h5Seurat") # only once
+data_hca <- LoadH5Seurat("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/adult_heart_cell_atlas/global_backup.h5seurat")
+data_hca2 <- LoadH5Seurat("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/adult_heart_cell_atlas/global_raw.h5seurat")
+
+# show donor by cell source. D6, D7 and D11 have cd45+ enrichment
+#donor_by_cell_source_tb <- table(data_hca$donor,data_hca$cell_source)
+#donor_by_cell_source_df<- data.frame(matrix(donor_by_cell_source_tb, ncol = 4, dimnames = list(row.names(donor_by_cell_source_tb), colnames(donor_by_cell_source_tb))))
+#write.table(donor_by_cell_source_df, "/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/hca_donor_by_cell_source_table.tsv", quote = F,sep = "\t")
+
+names(data_hca@meta.data)[6] <- c("orig.ident")
+data_hca <- data_hca[,data_hca$cell_source %in% c("Harvard-Nuclei","Sanger-Nuclei")]
+data_hca <- data_hca[,data_hca$region=="SP"]
+
+# 7 healthy human heart samples from Tucker et. al.
+#Convert("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/tucker_et_al/healthy_human_4chamber_map_unnormalized_V3.h5ad","h5Seurat")  # only once
+data_thh <- LoadH5Seurat("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/tucker_et_al/healthy_human_4chamber_map_unnormalized_V3.h5seurat")
+metadata_thh <- read.delim("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/tucker_et_al/meta.data.v3.txt", colClasses = c(rep("character",5),rep("integer",3),rep("numeric",1)))
+# import metadata and adjust names to cell atlas metadata
+data_thh@meta.data <- metadata_thh
+names(data_thh@meta.data)[c(2,6,7,8,9)] <- c("cell_type","donor","n_counts","n_genes","percent_mito")
+
+#### Data from Badder and Luka. Five Aortic stenosis samples for integration ####
+load("/media/Helios_scStorage/Luka/ACE2_SARS_CoV2/Healthy AS DD HFrEF/For EHJ Letter/healthy_as_hfpef_hfref_for_ace2.RData")
+combined_filtered <- combined_filtered[,combined_filtered$orig.ident %in% c(3005,3011,3013,3015,3018)]
+combined_filtered <- DietSeurat(combined_filtered, assays = "RNA")
+combined_filtered$`RNA_snn_res.0,5` <- NULL
+combined_filtered$`integrated_snn_res.0,6` <- NULL
+combined_filtered$integrated_snn_res.0.6 <- NULL
+names(combined_filtered@meta.data)[c(2,3,7,9)] <- c("n_counts","n_genes","percent_mito","cell_type")
+
+```
+
+```{Seurat pipeline Tucker data}
+library(tictoc)
+data_hca$dataset <- factor(rep("hca",ncol(data_hca)))
+data_thh$dataset <- factor(rep("thh",ncol(data_thh)))
+
+human_heart <- merge(data_hca,data_thh,c("hca","thh"))
+saveRDS(human_heart,"/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/merged_data_AS_SP_nuc.rds")
+#human_heart <- readRDS("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/merged_data.rds")
+
+# before Harmony integration
+seurat_object <- NormalizeData(human_heart) %>%
+FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>%
+ScaleData() %>%
+RunPCA()
+
+
+ElbowPlot(seurat_object, ndims = 50)
+tic()
+seurat_object <- RunUMAP(seurat_object, reduction = "pca", dims = 1:15,reduction.name = "umap_before") %>% 
+    FindNeighbors(reduction = "pca", dims = 1:15) %>% 
+    FindClusters(resolution = 0.5)
+toc()
+
+p1 <- DimPlot(seurat_object, reduction = "pca", pt.size = .1, group.by = "dataset")
+p1$layers[[1]]$aes_params$alpha <- 0.1
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/pca_before_harmony_as.png", p1, device = "png")
+p1_1 <- DimPlot(seurat_object, reduction = "pca", pt.size = .1, split.by = "dataset")
+p1_1$layers[[1]]$aes_params$alpha <- 0.1
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/pca_before_harmony_as_split.png", p1_1, device = "png")
+p2 <- DimPlot(seurat_object, reduction = "umap_before", pt.size = .1, group.by = "dataset")
+p2$layers[[1]]$aes_params$alpha <- 0.1
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_before_harmony_as.png", p2, device = "png")
+
+tic()
+seurat_object <- RunHarmony(seurat_object, "dataset", plot_covergence = T)
+toc()
+#1st: 2629.799 sec elapsed
+#2nd: 2526.928 sec elapsed
+#3rd: 1950.528 sec elapsed
+
+p3 <- DimPlot(seurat_object, reduction = "harmony", pt.size = .1, group.by = "dataset")
+
+# After Harmony integration
+tic()
+ElbowPlot(seurat_object, ndims = 50)
+seurat_object <- RunUMAP(seurat_object, reduction = "harmony", dims = 1:15) %>% 
+    FindNeighbors(reduction = "harmony", dims = 1:15) %>% 
+    FindClusters(resolution = 0.5)
+toc()
+
+p3 <- DimPlot(seurat_object, reduction = "umap", group.by = "dataset", pt.size = .1, split.by = 'dataset')
+p4 <- DimPlot(seurat_object, reduction = "umap", group.by = "dataset", pt.size = .1)
+p4$layers[[1]]$aes_params$alpha <- 0.1
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_harmonied_hca_thh2.png", p4 ,device = "png")
+p5 <- DimPlot(seurat_object, reduction = "umap", group.by = "cell_type", pt.size = .1)
+p5$layers[[1]]$aes_params$alpha <- 0.2
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_harmonied_celltypes_splitby_dataset_hca_thh.png")
+
+seurat_object <- readRDS("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/seurat_object_harmonized.rds")
+seurat_object$cell_type <- factor(seurat_object$cell_type)
+new_names <- matrix(unlist(strsplit(levels(seurat_object$cell_type)[1:17],split = "\\. ")),ncol = 2,byrow = T)[,2]
+new_names[c(3:6,12,15)] <- c("CMC Atrial","CMC Ventricular I","CMC Cytoplasmic I","CMC Ventricular II","CMC Cytoplasmic I", "CMC Ventricular III")
+levels(seurat_object$cell_type)[1:17] <- new_names
+
+DimPlot(seurat_object[,seurat_object$dataset=="hca"], reduction = "umap", group.by = "cell_type",label = T, label.size = 7, repel = T)
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_harmonized_hca.png", device = "png", height = 9, width = 12)
+p_after <- DimPlot(seurat_object[,seurat_object$dataset=="thh"], reduction = "umap", group.by = "cell_type",label = T, label.size = 7, repel = T)
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_harmonized_thh23.png", p_after, device = "png", height = 9, width = 12)
+
+seurat_object <- FindClusters(seurat_object, resolution = 0.3)
+p5 <- DimPlot(seurat_object,reduction = "umap", label = T)
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_harmonized_thh_cluster0_3.png",p5,height = 9, width = 12)
+
+p6<- FeaturePlot(seurat_object,features = c("DCN", "RGS5", "MYH11", "VWF", "GPAM", "NRXN3", "MYL7", "NPPA", "FHL2", "CD163","LYZ", "RBPJ"),reduction = "umap")
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/featureplot_tucker22.png", p6, device = "png", height = 13, width = 18)
+
+```
+
+```{r Aortic stenosis data}
+library(tictoc)
+data_hca$dataset <- factor(rep("hca",ncol(data_hca)))
+combined_filtered$dataset <- factor(rep("aort_sten",ncol(combined_filtered)))
+combined_filtered$region <- factor(rep("SP",ncol(combined_filtered)))
+
+human_heart <- merge(data_hca,combined_filtered,c("hca","aort_sten"))
+saveRDS(human_heart,"/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/merged_hca_as_sp_nuc.rds")
+human_heart <- readRDS("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/merged_hca_as_sp_nuc.rds")
+seurat_object <- NormalizeData(human_heart) 
+seurat_object <- FindVariableFeatures(seurat_object)
+seurat_object <- ScaleData(seurat_object)
+seurat_object <- RunPCA(seurat_object)
+
+#ElbowPlot(seurat_object, ndims = 50)
+#tic()
+#seurat_object <- RunUMAP(seurat_object, reduction = "pca", dims = 1:15,reduction.name = "umap_before")
+#seurat_object <- FindNeighbors(seurat_object, reduction = "pca", dims = 1:15)
+#seurat_object <- FindClusters(seurat_object, resolution = 0.5)
+#toc()
+
+#p2 <- DimPlot(seurat_object, reduction = "umap_before", pt.size = .1, group.by = "dataset")
+#p2$layers[[1]]$aes_params$alpha <- 0.1
+#p2$data$dataset <- factor(p2$data$dataset, levels = c("hca","aort_sten"))
+#levels(p2$data$dataset) <- c("HCA", "AS")
+#ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_hca_as_cp_nuc_before_harmony.png", p2, device = "png", height = 5, width = 6)
+
+#tic()
+seurat_object <- RunHarmony(seurat_object, "dataset", plot_convergence = T)
+#toc()
+#1st: 1253.965 sec elapsed
+# 1233.707 sec elapsed
+
+# After Harmony integration
+#ElbowPlot(seurat_object, ndims = 50)
+tic()
+seurat_object <- RunUMAP(seurat_object, reduction = "harmony", dims = 1:15) %>% 
+    FindNeighbors(reduction = "harmony", dims = 1:15) %>% 
+    FindClusters(resolution = 0.35)
+toc()
+
+## Save and write seurat object and create plots for meeting
+rm(data_hca)
+rm(human_heart)
+plots_out_path <- "/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/plots/"
+
+seurat_object_diet <- DietSeurat(seurat_object, dimreducs = c("pca","harmony", "umap"),graphs = c("RNA_nn","RNA_snn"))
+saveRDS(seurat_object_diet,"/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/seurat_object_hca_as_harmonized_AS_SP_nuc.rds")
+seurat_object <- readRDS("/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/seurat_object_hca_as_harmonized_AS_SP_nuc_refined_cells.rds")
+
+p3 <- DimPlot(seurat_object, reduction = "umap", pt.size = .1, group.by = "dataset")
+#p2$layers[[1]]$aes_params$alpha <- 0.1
+p3$data$dataset <- factor(p3$data$dataset, levels = c("hca","aort_sten"))
+levels(p3$data$dataset) <- c("HCA", "AS")
+ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_hca_as_cp_nuc_after_harmony.png", p3, device = "png", height = 5, width = 6)
+
+
+DimPlot(seurat_object[,seurat_object$dataset=="hca"], reduction = "umap", group.by = "cell_type",label = T, label.size = 7, repel = T)
+ggsave(paste0(plots_out_path,"umap_aorta_sten_harmonized_hca_as.png"), device = "png", height = 9, width = 12)
+DimPlot(seurat_object[,seurat_object$dataset=="aort_sten"], reduction = "umap", group.by = "cell_type",label = T, label.size = 7, repel = T)
+ggsave(paste0(plots_out_path,"umap_aorta_sten_harmonized_aort_sten_as.png"), device = "png", height = 9, width = 12)
+
+p5 <- DimPlot(seurat_object,pt.size = .4,reduction = "umap", label = T)
+ggsave(paste0(plots_out_path,"umap_as_hca_harmonized_cluster.png"),p5,height = 9, width = 12)
+
+p62<- FeaturePlot(seurat_object,features = c("DCN", "RGS5", "MYH11", "VWF", "GPAM", "NRXN3", "NPPA", "FHL2", "CD163","LYZ","PTPRC", "RBPJ"),reduction = "umap",order = T)
+ggsave(paste0(plots_out_path,"featureplot_as_hca.png"), p62, device = "png", height = 13, width = 18)
+
+seurat_object$cell_type <- factor(seurat_object$cell_type)
+levels(seurat_object$cell_type) <- c("Adipocytes","CM","CM","CM","CM","CM","CM","CM","EC","EC","EC","EC","EC","FB","FB","Leukocytes","Leukocytes","Lymphoid","Myeloid","Neuronal","Neuronal","PC","PC","SMC","SMC","Unk1","Unk2")
+DimPlot(seurat_object,reduction = "umap", label = T,group.by = "cell_type",repel = T,label.size = 5,pt.size = .4)
+ggsave(paste0(plots_out_path,"umap_harmonized_celltype.png"),device = "png",height = 9, width = 12)
+
+#PLOTS FOR MEETING plot position in heart
+cells_regions <- list()
+cells_dataset <- list()
+for (i in 0:(length(table(seurat_object$seurat_clusters))-1)){
+  cluster_subset <- seurat_object[,seurat_object$RNA_snn_res.0.35 == i]
+  print(table(cluster_subset$RNA_snn_res.0.35))
+  cells_regions[[as.character(i)]] <- as.table(table(cluster_subset$dataset,cluster_subset$region)["hca",])
+  cells_dataset[[as.character(i)]] <- table(cluster_subset$dataset)
+}
+
+# assign cluster to celltype
+cluster_to_cell <- list(Cardiomyocytes=c(0,1,3,6,7,8,14),
+                      Endothelial_cells=c(5),
+                      Fibroblasts=c(4,11,12,16),
+                      Myeloid=c(9),
+                      Lymphoid=c(13,18),
+                      Adipocytes=c(17),
+                      SMC=c(10),
+                      PC=c(2),
+                      Neuronal=c(15))
+
+#normalize by total cell count per cluster
+# per region
+plot_data_region <- melt(lapply(cells_regions, function(x) x/sum(x)))
+plot_data_region$L1 <- factor(plot_data_region$L1, levels = unlist(cluster_to_cell))
+plot_data_region <- merge(plot_data_region,melt(cluster_to_cell),by.x = "L1",by.y = "value")
+colnames(plot_data_region) <- c("Cluster","region","Contrib","Cell_types")
+plot_data_region$Cell_types <- factor(plot_data_region$Cell_types,levels = names(cluster_to_cell))
+# per dataset
+n_cell_as <- unname(table(seurat_object$dataset)["aort_sten"])
+n_cell_hca <- unname(table(seurat_object$dataset)["hca"])
+plot_data_dataset <- melt(lapply(cells_dataset, function(x) {
+  x[1] <- x[1]/n_cell_as
+  x[2] <- x[2]/n_cell_hca
+  x
+  }))
+plot_data_dataset$L1 <- factor(plot_data_dataset$L1, levels = unlist(cluster_to_cell))
+plot_data_dataset[41:42,1] <- c("aort_sten", "hca")
+levels(plot_data_dataset$Var1) <- c("Aortic Stenosis","Human heart cell atlas")
+plot_data_dataset <- merge(plot_data_dataset,melt(cluster_to_cell),by.x = "L1",by.y = "value")
+colnames(plot_data_dataset) <- c("Cluster","Datasets","Contrib","Cell_types")
+plot_data_dataset$Cell_types <- factor(plot_data_dataset$Cell_types,levels = names(cluster_to_cell))
+levels(plot_data_dataset$Cell_types)[1:3] <- c("CM", "EC" ,"FB")
+
+ggplot(plot_data_region,aes(x=Cluster,y=Contrib*100)) + geom_col(aes(fill = Cell_types)) +
+  facet_grid(.~region,scales = "free",space = "free") +
+  theme_light() + ylab("Contribution of dataset to region (%)") +
+  scale_fill_manual(values=c("#a6cee3","#1f78b4","#b2df8a","#33a02c","#fb9a99","#e31a1c","#fdbf6f","#ff7f00","#cab2d6","#6a3d9a")) +
+  theme(text= element_text(size = 20),panel.grid.major.x = element_blank())
+ggsave(paste0(plots_out_path,"heartregion_per_cluster_as.svg"),device = "svg", width = 24,height = 5.5)
+
+ggplot(plot_data_dataset,aes(x=Cluster,y=Contrib*100)) + geom_col(aes(fill = Cell_types)) +
+  facet_grid(Datasets~., space = "free") +
+  theme_light() + ylab("Contribution of dataset to cluster (%)") +
+  scale_fill_manual(values=c("#a6cee3","#1f78b4","#b2df8a","#33a02c","#fb9a99","#e31a1c","#fdbf6f","#ff7f00","#cab2d6","#6a3d9a")) +
+  theme(text= element_text(size = 16), panel.grid.major = element_blank(),panel.grid.minor = element_blank(), legend.position = "top", legend.box = "horizontal") +
+  guides(fill=guide_legend(title = "Cell types"))
+ggsave(paste0(plots_out_path,"dataset_per_cluster_as.svg"),device = "svg", width = 6,height = 8.5)
+
+p_region<- DimPlot(seurat_object[,seurat_object$dataset=="hca"], label =T, label.size = 7, reduction = "umap", group.by = "cell_type",split.by = "region",pt.size = .1)
+ggsave(paste0(plots_out_path,"regions_from_hca_per_cluster_as334.png", p_region, device = "png",height = 6,width = 22))
+
+```
+
+```{r}
+seurat_object <- readRDS("/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/seurat_object_hca_as_harmonized_AS_SP_nuc.rds")
+
+cluster_order <- list(Cardiomyocytes=c(0,1,3,6,7,8,14),
+                      EC=c(5),
+                      Fibroblasts=c(4,11,12,16),
+                      Myeloid=c(9),
+                      Lymphoid=c(13,18),
+                      SMC=c(10),
+                      PC=c(2),
+                      Adi=c(17),
+                      Neuro=c(15))
+
+seurat_object$celltype_old <- seurat_object$cell_type
+seurat_cluster_tmp <- seurat_object$seurat_clusters
+levels(seurat_cluster_tmp) <- c("CM", "CM", "PC", "CM", "FB", "EC", "CM", "CM_low_QC", "CM_low_QC", "Myeloid", "SMC", "FB_low_QC", "FB_low_QC", "Lympoid", "CM_low_QC", "Neuro", "FB_low_QC", "Adi_low_QC", "Lympoid")
+
+seurat_object$cell_type <- seurat_cluster_tmp
+
+percent_mito_tmp <- seurat_object$percent_mito
+percent_mito_tmp[seurat_object$dataset=="hca"] <- percent_mito_tmp[seurat_object$dataset=="hca"]*100
+seurat_object$percent_mito <- percent_mito_tmp
+
+saveRDS(seurat_object, "/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/seurat_object_hca_as_harmonized_AS_SP_nuc_refined_cells.rds")
+
+DimPlot(seurat_object,group.by = "cell_type", label = T)
+ggsave("/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/plots/umap_refined_cell_types.png", device = "png", height = 7, width = 8)
+```
+
+
+```{r create metricies LISI}
+library(lisi)
+
+seurat_object <- readRDS("/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/seurat_object_hca_as_harmonized_AS_SP_nuc_refined_cells.rds")
+
+#save umap coordinates
+my_X <- seurat_object@reductions[["umap"]]@cell.embeddings
+
+my_meta_data <- data.frame(sample = seurat_object$orig.ident, dataset = seurat_object$dataset)
+
+res <- compute_lisi(my_X, my_meta_data, c("sample", "dataset"))
+
+plot_data <- cbind(my_X, res)
+
+ggplot(plot_data, aes(x = UMAP_1,y = UMAP_2,color = dataset), alpha = 0.1) +
+  geom_point(size = 0.1) +
+  theme_classic() +
+  xlab("UMAP 1") +
+  ylab("UMAP 2") +
+  scale_color_gradientn(name= "LISI", colours = c("#112244", "#55AAFF")) +
+  theme(text = element_text(size = 15))
+
+ggsave("/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/plots/metrics/lisi_dataset_umap2.png", device = "png", height = 5, width = 6)
+
+ggplot(plot_data, aes(dataset)) +
+  geom_freqpoly(bins = 50) +
+  theme_classic() +
+  xlab("LISI") +
+  ylab("Frequency")
+
+quantile(plot_data$dataset, seq(0,1,0.025))
+
+ggsave("/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/plots/metrics/lisi_dataset_density.svg", device = "svg", height = 4, width = 8)
+
+
+#### Create Violin plots per cluster of LISI scores  11_05_2021 ####
+
+
+seurat_object <- readRDS("/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/seurat_object_hca_as_harmonized_AS_SP_nuc_refined_cells.rds")
+
+#save umap coordinates
+my_X <- seurat_object@reductions[["umap"]]@cell.embeddings
+
+my_meta_data <- data.frame(sample = seurat_object$orig.ident, 
+                           dataset = seurat_object$dataset)
+
+res <- compute_lisi(my_X, my_meta_data, c("sample", "dataset"))
+
+plot_data <- cbind(seurat_object[["seurat_clusters"]], res)
+
+p_lisi <- ggplot(plot_data, aes(x = seurat_clusters, y = dataset)) + 
+  geom_violin(scale = "width", fill = "#f0f0f0") +
+  theme_classic() +
+  scale_y_continuous(expand = c(0.002, 0)) +
+  #geom_vline(xintercept = c(seq(1.5, 19, 1)), color = "grey") +
+  xlab("Cluster") + 
+  ylab("LISI score") +
+  theme(text = element_text(size = 14))
+  
+ggsave("/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/For_paper_luka/Violinplot_LISI_score_per_cluster.svg", p_lisi, device = "svg", width = 9, height = 5)
+
+
+
+```
+
+```{r}
+isi <- function(n) {
+  p <- n / sum(n)
+  1 / sum(p ^ 2)
+}
+dataset_count <- unname(table(seurat_object$dataset))
+round(isi(dataset_count),2)
+#observed LISI
+mean(res$dataset)
+
+
+dataset_count <- unname(table(seurat_object$orig.ident))
+round(isi(dataset_count),2)
+mean(res$sample)
+
+
+```
+
+```{r create matrices kBET}
+library(kBET)
+library(tictoc)
+batch.estimate <- kBET(data, batch, plot=FALSE)
+data <- seurat_object@assays$RNA@data
+batch <- seurat_object$orig.ident
+batch <- seurat_object$dataset
+## Subsampling matrix because kBET can handle only dense matrices and it exceeds the boundry of 2^31 entries in the matrix
+subset_size <- 0.3
+
+subset_id <- sample.int(n = length(batch), size = floor(subset_size * length(batch)), replace=FALSE)
+data <- t(as.matrix(data[,subset_id]))
+
+tic()
+batch.estimate <- kBET(data, batch[subset_id])
+toc()
+saveRDS(batch.estimate ,"/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/plots/metrics/batch_estimates_kbet.rds")
+
+
+
+data <- seurat_object@assays$RNA@data
+batch <- seurat_object$dataset
+subset_size <- 0.7 #subsample to 10% of the data
+subset_id_2 <- sample.int(n = length(batch), size = floor(subset_size * length(batch)), replace=FALSE)
+data <- t(as.matrix(data[,subset_id_2]))
+#data <- t(as.matrix(data))
+batch <- batch[subset_id_2]
+clusters <- seurat_object$seurat_clusters
+clusters <- clusters[subset_id_2]
+kBET_result_list <- list()
+sum_kBET <- 0
+tic()
+for (cluster_level in sort(unique(clusters))){
+  print(cluster_level)
+  batch_tmp <- batch[clusters == cluster_level]
+  data_tmp <- data[clusters == cluster_level,]
+  kBET_tmp <- kBET(df=data_tmp, batch=batch_tmp, plot=FALSE)
+  kBET_result_list[[cluster_level]] <- kBET_tmp
+  sum_kBET <- sum_kBET + kBET_tmp$summary$kBET.observed[1]
+}
+toc()
+saveRDS(kBET_result_list ,"/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/plots/metrics/batch_estimates_kbet_per_cluster.rds")
+
+sapply(kBET_result_list, function(x) print(x$summary$kBET.observed[1]))
+for (i in names(kBET_result_list)){
+  
+}
+
+pca.data <- prcomp(data, center=TRUE) #compute PCA representation of the data
+batch.silhouette <- batch_sil(pca.data, batch)
+batch.pca <- pcRegression(pca.data, batch)
+```
+
+

@@ -1,0 +1,58 @@
+---
+title: "Data_wrangling"
+author: "Ralf"
+date: "October 15, 2020"
+output: html_document
+---
+
+
+
+
+```{r Aortic stenosis data}
+library(tictoc)
+data_hca$dataset <- factor(rep("hca",ncol(data_hca)))
+combined_filtered$dataset <- factor(rep("aort_sten",ncol(combined_filtered)))
+combined_filtered$region <- factor(rep("SP",ncol(combined_filtered)))
+
+human_heart <- merge(data_hca,combined_filtered,c("hca","aort_sten"))
+
+seurat_object <- NormalizeData(human_heart) %>%
+FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>%
+ScaleData() %>%
+RunPCA()
+
+#ElbowPlot(seurat_object, ndims = 50)
+#tic()
+#seurat_object <- RunUMAP(seurat_object, reduction = "pca", dims = 1:15,reduction.name = "umap_before") %>% 
+#    FindNeighbors(reduction = "pca", dims = 1:15) %>% 
+#    FindClusters(resolution = 0.5)
+#toc()
+
+#p2 <- DimPlot(seurat_object, reduction = "umap_before", pt.size = .1, group.by = "dataset")
+#p2$layers[[1]]$aes_params$alpha <- 0.1
+#p2$data$dataset <- factor(p2$data$dataset, levels = c("hca","aort_sten"))
+#ggsave("/media/Helios_scStorage/Ralf/Heart_cell_atlas/data/output/umap_aorta_sten_before_harmony.png", p2, device = "png")
+
+tic()
+seurat_object <- RunHarmony(seurat_object, "dataset", plot_convergence = T)
+toc()
+#1st: 1253.965 sec elapsed
+# 1233.707 sec elapsed
+
+# After Harmony integration
+#ElbowPlot(seurat_object, ndims = 50)
+tic()
+seurat_object <- RunUMAP(seurat_object, reduction = "harmony", dims = 1:15) %>% 
+    FindNeighbors(reduction = "harmony", dims = 1:15) %>% 
+    FindClusters(resolution = 0.5)
+toc()
+
+## Save and write seurat object and create plots for meeting
+rm(data_hca)
+rm(human_heart)
+plots_out_path <- "/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/plots/"
+
+seurat_object_diet <- DietSeurat(seurat_object, dimreducs = c("pca","harmony", "umap"),graphs = c("RNA_nn","RNA_snn"))
+saveRDS(seurat_object_diet,"/media/Helios_scStorage/SingleCell/Human/WholeHeart/Heart_cell_atlas_aortic_stenosis_harmonized/Harmonized_whole_dataset_only_as_only_septum_only_nuc/seurat_object_hca_as_harmonized_AS_SP_nuc.rds")
+```
+
