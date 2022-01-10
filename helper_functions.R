@@ -1,3 +1,72 @@
+#' 
+#' @author David John
+#' @param seuratObject 
+#' @return filtered seurat object
+FilterDeadCells <- function(seuratObject, species = "human", low.tresholds=c(500,-Inf), high.tresholds=c(Inf, 0.1)){
+  # The number of features and UMIs (nFeature_RNA and nCount_RNA) are automatically calculated for every object by Seurat.
+  # For non-UMI data, nCount_RNA represents the sum of the non-normalized values within a cell
+  # We calculate the percentage of mitochondrial features here and store it in object metadata as `percent.mito`.
+  # We use raw count data since this represents non-transformed and non-log-normalized counts
+  # The % of UMI mapping to MT-features is a common scRNA-seq QC metric.
+  cat("Filter Dead Cells \n")
+  if (species == "human") {
+    mito.features <- grep(pattern = "^MT-", x = rownames(x = seuratObject), value = TRUE)
+  }
+  else if (species == "mouse") {
+    mito.features <- grep(pattern = "^mt-", x = rownames(x = seuratObject), value = TRUE)
+  } 
+  else {
+    cat("species must be mouse or human")
+  }
+  mito.genes <- grep(pattern = "^mt-", x = rownames(x = seuratObject@data), value = TRUE)
+  percent.mito <- Matrix::colSums(seuratObject@raw.data[mito.genes, ])/Matrix::colSums(seuratObject@raw.data)
+  seuratObject <- AddMetaData(object = seuratObject, metadata = percent.mito, col.name = "percent.mito")
+  nCellsBefore <-length(seuratObject@ident)
+  seuratObject <- FilterCells(object = seuratObject, subset.names = c("nGene", "percent.mito"), low.thresholds = low.tresholds, high.thresholds = high.tresholds)
+  nCellsAfter <-length(seuratObject@ident)
+  cat(nCellsAfter, " out of ", nCellsBefore, " passed the Dead Cell filters")
+  
+  return(seuratObject)
+}
+
+
+
+
+#' Import Single cell sequencing experiments into Seurat and ronnarmalisation and scale Data 
+#' @author David John
+#' @param pathways A vector of pathways to the cellrancer count output folder (contains barcodes.tsv, genes.tsv, matrix.mtx)
+#' @param ids Vector of strings that are assigned to the concordant cells
+#' @return Merged seurat object
+Importer <- function(pathway,id, TenX=TRUE, performNormalisation=TRUE, performVariableGeneDetection=TRUE, performScaling = TRUE, filterDeadCells=TRUE) {
+  if (TenX) {
+    Matrix <- Read10X(pathway)
+  }  else{
+    Matrix <- read.table(pathway,header = TRUE,sep = ",", dec = ".", row.names = 1)
+  }
+  
+  seuratObject =CreateSeuratObject(raw.data = Matrix, min.cells= 3, min.genes = 200)
+  seuratObject<-RenameCells(object = seuratObject, add.cell.id = id)
+  if (filterDeadCells==TRUE) {
+    seuratObject<-FilterDeadCells(seuratObject = seuratObject,species = "human", low.tresholds=c(400,-Inf), high.tresholds=c(Inf, 0.1))
+  }
+  if (performNormalisation==TRUE) {
+    seuratObject<-NormalizeData(object = seuratObject)
+  }
+  if(performVariableGeneDetection){
+    seuratObject<-FindVariableGenes(object = seuratObject, do.plot = FALSE)
+  }
+  if(performScaling){
+    seuratObject<-ScaleData(object = seuratObject)
+  }
+  
+  cat("Imported ", length(seuratObject@ident), " cells from ", pathway, "with ID ", id, "\n")
+  return(seuratObject)
+}
+
+
+
+
+
 ## prepare data for cluster t.test from the deg list and do a cluster t-test
 do_cluster_t_test <- function(seurat_subset, degs, m_group="dataset", m_cluster="seurat_clusters"){
   gene_names<- names(table(degs$gene))
